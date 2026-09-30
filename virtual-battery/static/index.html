@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>虚拟电池情景编排</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>🔋 虚拟电池情景编排</h1>
+      <div class="meta" v-if="record.id">
+        <span>情景 ID：<code>{{ record.id }}</code></span>
+        <span>修订号：<strong>rev {{ record.revision }}</strong></span>
+      </div>
+    </header>
+
+    <p v-if="message.text" class="banner" :class="message.kind">{{ message.text }}</p>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>情景参数</h2>
+        <div class="actions">
+          <button @click="newScenario">新建情景</button>
+          <button :disabled="!record.id" @click="reload">重新加载</button>
+          <button class="primary" :disabled="busy || !dirty" @click="save">
+            {{ record.id ? '保存修订' : '创建并保存' }}
+          </button>
+          <button class="solve" :disabled="busy || !record.id || dirty" @click="solve">
+            求解当前修订
+          </button>
+        </div>
+      </div>
+      <p class="hint" v-if="dirty">
+        ⚠️ 表单相对已保存的修订号 <strong>{{ savedRevision }}</strong> 有未保存修改；
+        之前的求解计划已<strong>作废</strong>，保存后请重新求解。
+      </p>
+
+      <div class="params">
+        <label>容量（≤50）
+          <input type="number" min="1" max="50" v-model.number="form.capacity" @input="markDirty" />
+        </label>
+        <label>初始电量
+          <input type="number" min="0" :max="form.capacity" v-model.number="form.initial_soc" @input="markDirty" />
+        </label>
+        <label>终点最低电量
+          <input type="number" min="0" :max="form.capacity" v-model.number="form.final_min_soc" @input="markDirty" />
+        </label>
+        <label>每段最大充电
+          <input type="number" min="1" :max="form.capacity" v-model.number="form.max_charge" @input="markDirty" />
+        </label>
+        <label>每段最大放电
+          <input type="number" min="1" :max="form.capacity" v-model.number="form.max_discharge" @input="markDirty" />
+        </label>
+        <label>时段数（8–48）
+          <input type="number" min="8" max="48" :value="form.load.length" @change="resizePeriods" />
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>逐段数据与计划</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时段</th>
+              <th>用电</th>
+              <th>光伏</th>
+              <th>购电单价</th>
+              <th>动作<br /><small>充+/放-/静置0</small></th>
+              <th>期初电量</th>
+              <th>期末电量</th>
+              <th>购电量</th>
+              <th>购电费用</th>
+              <th>光伏消纳</th>
+              <th>弃光</th>
+              <th>守恒校验</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, t) in rows" :key="t" :class="{ stale: planStale }">
+              <td class="dim">{{ t + 1 }}</td>
+              <td><input type="number" min="0" v-model.number="row.load" @input="markDirty" /></td>
+              <td><input type="number" min="0" v-model.number="row.pv" @input="markDirty" /></td>
+              <td><input type="number" min="0" v-model.number="row.price" @input="markDirty" /></td>
+              <td v-if="planRow(t)">{{ actionText(planRow(t).action) }}</td>
+              <td v-else class="dim">—</td>
+              <td>{{ planRow(t)?.soc_start ?? '—' }}</td>
+              <td>{{ planRow(t)?.soc_end ?? '—' }}</td>
+              <td>{{ planRow(t)?.buy ?? '—' }}</td>
+              <td>{{ planRow(t)?.cost ?? '—' }}</td>
+              <td>{{ planRow(t)?.pv_used ?? '—' }}</td>
+              <td :class="planRow(t) && planRow(t).curtailed > 0 ? 'curtail' : ''">
+                {{ planRow(t)?.curtailed ?? '—' }}
+              </td>
+              <td>
+                <span v-if="planRow(t)" :class="planRow(t).balance_lhs === planRow(t).balance_rhs ? 'ok' : 'bad'">
+                  {{ planRow(t).balance_lhs }}={{planRow(t).balance_rhs}}
+                </span>
+                <span v-else class="dim">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" v-if="plan">
+      <h2>求解结果（修订号 {{ planRevision }}）</h2>
+      <div v-if="planStale" class="banner warn">
+        此计划基于修订号 {{ planRevision }}，情景已被编辑（当前未保存编辑基于 rev {{ savedRevision }}），
+        以下<strong>不是新情景的计划</strong>，保存并重新求解前请勿采用。
+      </div>
+      <template v-if="plan.feasible">
+        <div class="kpis">
+          <div><span>总购电费用</span><strong>{{ plan.total_cost }}</strong></div>
+          <div><span>总购电量</span><strong>{{ plan.total_buy }}</strong></div>
+          <div><span>总弃光</span><strong>{{ plan.total_curtailed }}</strong></div>
+          <div><span>动作序列</span><strong class="mono">[{{ plan.actions.join(', ') }}]</strong></div>
+        </div>
+        <p class="hint">优化优先级：① 总购电费用最小 → ② 总购电量最小 → ③ 充放电序列字典序最小。</p>
+      </template>
+      <div v-else class="banner err">
+        情景无可行计划：{{ plan.reason }}
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/vue.global.prod.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
